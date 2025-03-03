@@ -1,105 +1,132 @@
-package com.example.bluetoothapp
+package com.example.gpsbluetooth
 
 import android.Manifest
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothProfile
+import android.bluetooth.*
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
+import android.os.Build
 import android.os.Bundle
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
+import android.util.Log
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
-import androidx.fragment.app.Fragment
-import com.example.bluetoothapp.databinding.FragmentFirstBinding
-import com.google.android.gms.location.*
+import com.example.bluetoothapp.databinding.ActivityMainBinding
+//import com.example.gpsbluetooth.databinding.ActivityMainBinding
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.material.snackbar.Snackbar
+import java.io.IOException
+import java.util.*
 
-class FirstFragment : Fragment() {
-
-    private var _binding: FragmentFirstBinding? = null
-    private val binding get() = _binding!!
-
+class MainActivity : AppCompatActivity() {
+    private lateinit var binding: ActivityMainBinding
     private lateinit var fusedLocationClient: FusedLocationProviderClient
-    private lateinit var locationRequest: LocationRequest
-    private lateinit var locationCallback: LocationCallback
+    private var bluetoothSocket: BluetoothSocket? = null
+    private val deviceName = "HC-05" // Change this to your Bluetooth module's name
+    private val uuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB") // Standard UUID for SPP
 
-    override fun onCreateView(
-        inflater: LayoutInflater, container: ViewGroup?,
-        savedInstanceState: Bundle?
-    ): View {
-        _binding = FragmentFirstBinding.inflate(inflater, container, false)
-        return binding.root
-    }
+    @RequiresApi(Build.VERSION_CODES.S)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
 
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        super.onViewCreated(view, savedInstanceState)
-
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(requireActivity())
-
-        // Initialize location request
-        locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000).build() // Update every 5 seconds
-
-        locationCallback = object : LocationCallback() {
-            override fun onLocationResult(locationResult: LocationResult) {
-                val location: Location? = locationResult.lastLocation
-                location?.let {
-                    val latitude = it.latitude
-                    val longitude = it.longitude
-                    binding.textviewFirst.text = "Latitude: $latitude, Longitude: $longitude"
-                } ?: run {
-                    binding.textviewFirst.text = "Failed to get location"
-                }
-            }
+        setSupportActionBar(binding.toolbar)
+        binding.fab.setOnClickListener { view ->
+            Snackbar.make(view, "Fetching location and sending via Bluetooth", Snackbar.LENGTH_LONG).show()
+            requestLocation()
         }
 
-        // Request location updates
-        requestLocationUpdates()
-
-        // Update Bluetooth device name
-        binding.textView3.text = getConnectedDeviceName()
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        requestPermissions()
+        connectBluetooth()
     }
 
-    private fun requestLocationUpdates() {
-        if (ActivityCompat.checkSelfPermission(
-                requireContext(),
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(
-                requireActivity(),
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
-                1
-            )
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun requestPermissions() {
+        val permissions = arrayOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.BLUETOOTH,
+            Manifest.permission.BLUETOOTH_ADMIN,
+            Manifest.permission.BLUETOOTH_CONNECT
+        )
+
+        val requestPermissionLauncher =
+            registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+                if (permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true) {
+                    requestLocation()
+                }
+            }
+        requestPermissionLauncher.launch(permissions)
+    }
+
+    private fun requestLocation() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            Log.e("GPS", "Location permission not granted")
             return
         }
-        fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, null)
+
+        fusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
+            location?.let {
+                val data = "Latitude: ${it.latitude}, Longitude: ${it.longitude}"
+                Log.d("GPS", data)
+                sendDataToBluetooth(data)
+            } ?: Log.e("GPS", "Failed to retrieve location")
+        }
     }
 
-    private fun getConnectedDeviceName(): String {
+    private fun connectBluetooth() {
         val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
-        if (ActivityCompat.checkSelfPermission(
-                requireContext(),
-                Manifest.permission.BLUETOOTH_CONNECT
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            return "Bluetooth Permission Not Granted"
+        if (bluetoothAdapter == null) {
+            Log.e("Bluetooth", "Device does not support Bluetooth")
+            return
         }
-        val pairedDevices: Set<BluetoothDevice>? = bluetoothAdapter?.bondedDevices
-        pairedDevices?.forEach { device ->
-            if (device.bondState == BluetoothDevice.BOND_BONDED) {
-                val connectionState = bluetoothAdapter.getProfileConnectionState(BluetoothProfile.HEADSET)
-                if (connectionState == BluetoothProfile.STATE_CONNECTED) {
-                    return device.name
+
+        if (!bluetoothAdapter.isEnabled) {
+            val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+            startActivityForResult(enableBtIntent, 1)
+        }
+
+        val pairedDevices: Set<BluetoothDevice>? = bluetoothAdapter.bondedDevices
+        val device = pairedDevices?.find { it.name == deviceName }
+
+        if (device != null) {
+            try {
+                if (ActivityCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.BLUETOOTH_CONNECT
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    // TODO: Consider calling
+                    //    ActivityCompat#requestPermissions
+                    // here to request the missing permissions, and then overriding
+                    //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                    //                                          int[] grantResults)
+                    // to handle the case where the user grants the permission. See the documentation
+                    // for ActivityCompat#requestPermissions for more details.
+                    return
                 }
+                bluetoothSocket = device.createRfcommSocketToServiceRecord(uuid)
+                bluetoothSocket?.connect()
+                Log.d("Bluetooth", "Connected to $deviceName")
+            } catch (e: IOException) {
+                Log.e("Bluetooth", "Could not connect to $deviceName", e)
             }
+        } else {
+            Log.e("Bluetooth", "$deviceName not found in paired devices")
         }
-        return "No Connected Bluetooth Device"
     }
 
-    override fun onDestroyView() {
-        super.onDestroyView()
-        fusedLocationClient.removeLocationUpdates(locationCallback) // Stop updates to prevent memory leaks
-        _binding = null
+    private fun sendDataToBluetooth(data: String) {
+        bluetoothSocket?.outputStream?.let { outputStream ->
+            try {
+                outputStream.write(data.toByteArray())
+                Log.d("Bluetooth", "Data sent: $data")
+            } catch (e: IOException) {
+                Log.e("Bluetooth", "Error sending data", e)
+            }
+        } ?: Log.e("Bluetooth", "Bluetooth socket is null")
     }
 }
