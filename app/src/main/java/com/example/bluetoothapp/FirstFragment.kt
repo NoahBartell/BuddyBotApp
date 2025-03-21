@@ -5,15 +5,14 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import android.os.Bundle
-import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.fragment.app.Fragment
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
+import kotlinx.coroutines.*
 import java.io.IOException
 import java.util.*
-import kotlin.concurrent.thread
 
 class FirstFragment : Fragment() {
 
@@ -21,8 +20,8 @@ class FirstFragment : Fragment() {
     private var bluetoothSocket: BluetoothSocket? = null
     private val deviceName = "DSD TECH HC-05" // Bluetooth module name
     private val uuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB") // Standard SPP UUID
-    private val handler = Handler(Looper.getMainLooper())
     private var isSendingLocation = false
+    private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         Log.e("APP", "Created")
@@ -51,7 +50,7 @@ class FirstFragment : Fragment() {
         val device = pairedDevices?.find { it.name == deviceName }
 
         device?.let {
-            thread {
+            coroutineScope.launch {
                 try {
                     bluetoothSocket = it.createRfcommSocketToServiceRecord(uuid)
                     bluetoothSocket?.connect()
@@ -67,32 +66,51 @@ class FirstFragment : Fragment() {
     private fun startSendingLocation() {
         if (!isSendingLocation) {
             isSendingLocation = true
-            val runnable = object : Runnable {
-                override fun run() {
+            coroutineScope.launch {
+                while (isSendingLocation) {
+                    Log.d("GPS", "Requesting location")
                     requestLocation()
-                    handler.postDelayed(this, 5000) // Repeat every 5 seconds
+                    delay(5000) // Repeat every 5 seconds
                 }
             }
-            handler.post(runnable)
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun requestLocation() {
-        fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-            location?.let {
-                val data = "Latitude: ${it.latitude}, Longitude: ${it.longitude}"
-                Log.d("GPS", data)
-                sendDataToBluetooth(data)
-            } ?: Log.e("GPS", "Failed to retrieve location")
+    private suspend fun requestLocation() {
+        val locationRequest = com.google.android.gms.location.LocationRequest.Builder(
+            com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY, 5000
+        ).apply {
+            setMinUpdateIntervalMillis(2000)
+        }.build()
+
+        val locationCallback = object : com.google.android.gms.location.LocationCallback() {
+            override fun onLocationResult(locationResult: com.google.android.gms.location.LocationResult) {
+                locationResult ?: return
+                val location = locationResult.lastLocation
+                if (location != null) {
+                    val data = "Latitude: ${location.latitude}, Longitude: ${location.longitude}"
+                    Log.d("GPS", data)
+                    coroutineScope.launch {
+                        sendDataToBluetooth(data)
+                    }
+                    fusedLocationClient.removeLocationUpdates(this) // Stop location updates after receiving the first result
+                }
+            }
+        }
+
+        withContext(Dispatchers.Main) {
+            fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
         }
     }
 
-    private fun sendDataToBluetooth(data: String) {
+    private suspend fun sendDataToBluetooth(data: String) {
         bluetoothSocket?.let { socket ->
             try {
                 val outputStream = socket.outputStream
-                outputStream.write(data.toByteArray())
+                withContext(Dispatchers.IO) {
+                    outputStream.write(data.toByteArray())
+                }
                 Log.d("Bluetooth", "Data sent: $data")
             } catch (e: IOException) {
                 Log.e("Bluetooth", "Error sending data", e)
@@ -104,12 +122,12 @@ class FirstFragment : Fragment() {
         super.onDestroyView()
         stopSendingLocation()
         bluetoothSocket?.close()
+        coroutineScope.cancel()
     }
 
     private fun stopSendingLocation() {
         if (isSendingLocation) {
             isSendingLocation = false
-            handler.removeCallbacksAndMessages(null) // Stop location updates
         }
     }
 }
